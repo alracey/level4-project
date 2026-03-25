@@ -93,6 +93,25 @@ def get_p2_vec(E2, costheta2, phi2, p1_vec):
     pz = E2 * costheta2.unsqueeze(-1) * p1_hat
     return px + py + pz
 
+def single_hypercube_to_momenta(X, m_t):
+    '''X: (5,) ---> P, P1, P2, P3 (4,), jacobian (1)'''
+
+    u0, u1, u2, u3, u4 = [X[i] for i in range(5)] 
+
+    #mapping
+    E1 = 0.5 * m_t * torch.sqrt(u0)
+    E2 = (0.5 * m_t - E1) + E1 * u1
+    costheta1 = 2 * u2 - 1
+    phi1 = 2 * torch.pi * u3
+    phi2 = 2 * torch.pi * u4
+    jacobian = m_t**2 * (torch.pi)**2
+
+    costheta2 = get_costheta2(E1, E2, m_t)
+
+    #momenta
+    p1_vec = get_p1_vec(E1, costheta1, phi1)
+    p2_vec = get_p2_vec(E2, costheta2, phi2, p1_vec)
+
 
 def hypercube_to_momenta(X, m_t=173):
     '''X: (N, 5) on unit interval [0,1]^5
