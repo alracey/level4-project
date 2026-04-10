@@ -982,8 +982,6 @@ def train_loop_decay(D, layer_type, A_dims, B_dims, K, hidden_size, N, epochs, l
     loss = torch.var(h_norm)
     loss_values[epoch] = loss.detach()
 
-    #scheduler.step(loss.detach())
-
     optimiser.zero_grad()
 
     loss.backward()
@@ -991,6 +989,8 @@ def train_loop_decay(D, layer_type, A_dims, B_dims, K, hidden_size, N, epochs, l
     #torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=1.0)
 
     optimiser.step()
+
+    scheduler.step()
 
     if ticker and epoch % 20 == 0:
       print(f"Epoch: {epoch} | Loss: {loss:.8e}")
