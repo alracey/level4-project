@@ -5,7 +5,7 @@ import torch
 import gc
 
 #example from VEGAS documentation tutorial#
-def f(x):
+'''def f(x):
     dx2 = 0
     for d in range(4):
         dx2 += (x[d] - 0.5)**2
@@ -16,7 +16,7 @@ integ = vegas.Integrator([[-1, 1], [0, 1], [0, 1], [0, 1]])
 result = integ(f, nitn=10, neval=1000)
 
 print(result.summary())
-
+'''
 
 #top decay width estimating
 
@@ -125,3 +125,4 @@ def vegas_decay_width_estimator(
     weights_all = torch.cat(weights_all, dim=0) #(B_total,)
 
     return mean, stderr, events_all, weights_all, integ, result
+

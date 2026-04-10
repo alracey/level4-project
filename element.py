@@ -67,7 +67,7 @@ def get_local_basis(p1_vec):
     n2 = torch.linalg.cross(p1_hat, n1_hat, dim=-1)
     n2_hat = n2 / torch.linalg.norm(n2, dim=-1, keepdim=True)        #just in case
 
-    return p1_hat, n1_hat, n2_hat       #each have shape ?
+    return p1_hat, n1_hat, n2_hat
 
 
 def get_costheta2(E1, E2, m_t=173):
