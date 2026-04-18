@@ -7,6 +7,8 @@ import element
 import numpy as np
 importlib.reload(element)
 
+#Define initial functions, plotting etc
+
 def camel(x, y):
   alpha = 0.2
   peak_1 = torch.exp(-(((x-1/4)**2 + (y-1/4)**2) / alpha**2))
@@ -14,6 +16,8 @@ def camel(x, y):
 
   return (0.5 * (alpha * torch.sqrt(torch.tensor(torch.pi)))**(-2)) * (peak_1 + peak_2)
 
+
+#Plot a function of two variables using colormesh
 
 def plot_f_2d(f, N):
   xs, ys = torch.linspace(0, 1, N), torch.linspace(0, 1, N)
@@ -42,6 +46,8 @@ def plot_f_2d(f, N):
   plt.show()
 
 
+#Cartesian grid of specified density
+
 def grid_points_2d(n, density):
 
   npts = n
@@ -61,6 +67,8 @@ def grid_points_2d(n, density):
 
   return grid
 
+
+#Plot a function of two variables on a Cartesian grid of specified density
 
 def plot_f_scatter_2d(f, n, density):
 
@@ -95,8 +103,103 @@ def plot_f_scatter_2d(f, n, density):
   plt.show()
 
 
+#Plot the distortion of a Cartesian grid under the action of coupling layers
 
-def pwl_g_coupling(x_A, x_B, heights, bins):
+def distortion_plot(X, h):
+  '''
+  X: (B, 2) after inverse flow
+  h: f(X) * jacobians (function evaluations)
+  '''
+
+  fig, ax = plt.subplots(figsize=(8,6))
+  plot = ax.scatter(
+    X[0].squeeze().cpu(),
+    X[1].squeeze().cpu(),
+    c=h.cpu(),
+    s=6,
+    cmap='viridis'
+  )
+  ax.set_xlabel("$x_1$", fontsize=15)
+  ax.set_ylabel("$x_2$", fontsize=15)
+
+  ax.tick_params(axis="both", which="major", direction="out", length=5, labelsize=10)
+  ax.tick_params(axis="both", which="minor", direction="out", length=3)
+  ax.minorticks_on()
+
+  cbar = plt.colorbar(plot, ax=ax)
+  cbar.formatter = ticker.FormatStrFormatter('%.2f')
+  cbar.ax.tick_params(labelsize=16)
+  cbar.update_ticks()
+
+  ax.set_xlim(0.0, 1.0)
+  ax.set_ylim(0.0, 1.0)
+
+  plt.show()
+
+
+def plot_hist(flow, num_samples, bins, device):
+  '''
+  Plots histogram of the distribution of x values induced by passing uniformly sampled y values through the flow provided.
+  Ideally this should resemble the original function as much as possible.
+  '''
+
+  Y = torch.rand(num_samples, 2).to(device)
+
+  X, jacobians = flow.inverse(Y)
+  X = X.detach().cpu()
+
+  fig, ax = plt.subplots(figsize=(8,6))
+
+  plot = ax.hist2d(
+        X[:,0],
+        X[:,1],
+        bins=bins,
+        range=[[0,1],[0,1]],
+        cmap = 'viridis'
+  )
+
+  cbar = plt.colorbar(plot[3], ax=ax)
+  cbar.ax.tick_params(labelsize=10)
+  cbar.update_ticks()
+
+  ax.set_xlabel("$x_1$", fontsize=15)
+  ax.set_ylabel("$x_2$", fontsize=15)
+
+  plt.show()
+
+
+def plot_weights(f, X, jacobians):
+  '''
+  Computes importance weights using given args and returns a scatter plot.
+  '''
+
+  weights = f(X[:,0], X[:,1]) * torch.abs(jacobians)
+  weights = weights.detach().cpu()
+
+  fig, ax = plt.subplots(figsize=(8,6))
+
+  sc = ax.scatter(
+      X[:,0],
+      X[:,1],
+      c=weights,
+      s=1,
+      cmap="viridis"
+  )
+
+  cbar = plt.colorbar(sc, ax=ax)
+  cbar.ax.tick_params(labelsize=10)
+  cbar.update_ticks()
+
+  ax.set_xlim(0.0, 1.0)
+  ax.set_ylim(0.0, 1.0)
+  plt.show()
+
+
+#-----COUPLING LAYERS-----#
+
+#PWL coupling transforms
+
+def pwl_g_coupling(x_A, x_B, heights, bins): 
 
   '''
   Coupling-layer compatible transform.  Preserves x_A, transforms x_B.
@@ -151,7 +254,7 @@ def pwl_g_coupling(x_A, x_B, heights, bins):
   return y_A, y_B
 
 
-def pwl_expand_params(B, params):   #copies parameters to fit batch size
+def pwl_expand_params(B, params):   #copies heights to fit batch size (only used for debugging)
   '''
   params.shape = (D, K-1)
   returns (B, D, K-1)
@@ -163,7 +266,7 @@ def pwl_expand_params(B, params):   #copies parameters to fit batch size
   expanded_params[:, :] = params
   return expanded_params
 
-def expand_edges(B, edges):   #copies bin edges to fit batch size
+def expand_edges(B, edges):   #copies bin edges to fit batch size (only used for debugging)
   '''
   edges.shape = (D, K+1)
   returns (B, D, K+1)
@@ -176,27 +279,27 @@ def expand_edges(B, edges):   #copies bin edges to fit batch size
   return expanded_edges
 
 
+
 def pwl_raw_heights_to_params(raw_heights):
-    """
+    '''
     raw_heights: (B, D, K-1)
 
     Returns:
         params: (B, D, K-1)
         strictly increasing in last dimension,
         between 0 and 1.
-    """
+    '''
 
     device = raw_heights.device
     dtype = raw_heights.dtype
 
     B, D, K_minus_1 = raw_heights.shape
 
-    # Append extra zero for normalization
+    # Append extra zero
     zeros = torch.zeros((B, D, 1), device=device, dtype=dtype)
-
     u_ext = torch.cat([raw_heights, zeros], dim=-1)  # (B, D, K)
 
-    # Softmax along bin dimension
+    # Softmax along 'bin' dimension
     w = torch.softmax(u_ext, dim=-1)  # (B, D, K)
 
     # Cumulative sum to get CDF
@@ -207,21 +310,19 @@ def pwl_raw_heights_to_params(raw_heights):
 
 
 def pwl_raw_heights_to_params_stable(raw_heights, min_cdf_inc=1e-3):
-    """
+    '''
+    Experimental version of previous function, with regulated cdf increments
     raw_heights: (B, D, K-1)
 
     returns heights: (B, D, K-1)
     such that cdf increments are all >= min_cdf_inc
-    """
+    '''
 
     device = raw_heights.device
     dtype = raw_heights.dtype
 
     B, D, K_minus_1 = raw_heights.shape
     K = K_minus_1 + 1
-
-    if not (0.0 <= min_cdf_inc < 1.0 / K):
-        raise ValueError(f"Need 0 <= min_cdf_inc < 1/K, got {min_cdf_inc} with K={K}")
 
     zeros = torch.zeros((B, D, 1), device=device, dtype=dtype)
     u_ext = torch.cat([raw_heights, zeros], dim=-1)   # (B, D, K)
@@ -235,14 +336,14 @@ def pwl_raw_heights_to_params_stable(raw_heights, min_cdf_inc=1e-3):
 
 
 def raw_widths_to_bins(raw_widths):
-    """
+    '''
     raw_widths: (B, D, K)
 
     Returns:
-        bins: (B, D, K+1)
+        bins: (B, D, K+1) bin edges
         increasing,
         starting at 0 and ending at 1.
-    """
+    '''
 
     device = raw_widths.device
     dtype = raw_widths.dtype
@@ -254,34 +355,32 @@ def raw_widths_to_bins(raw_widths):
     int_edges = torch.cumsum(widths, dim=-1)  # (B, D, K)
 
     # Prepend zero
-    zeros = torch.zeros((*int_edges.shape[:2], 1),
+    zeros = torch.zeros((*int_edges.shape[:2], 1),  #(B, D, 1)
                         device=device, dtype=dtype)
 
-    bins = torch.cat([zeros, int_edges], dim=-1)  # (B, D, K+1)
+    bins = torch.cat([zeros, int_edges], dim=-1)  # (B, D, K+1) bin edges
 
     return bins
 
 def raw_widths_to_bins_stable(raw_widths, min_bin_width=1e-3):
-    """
+    '''
+    Experimental version of above function, with regulated bin widths
     raw_widths: (B, D, K)
-    returns bins: (B, D, K+1)
-    """
+    returns bins: (B, D, K+1) bin edges such that bin widths are all >=min_bin_width
+    '''
 
     device = raw_widths.device
     dtype = raw_widths.dtype
     K = raw_widths.size(-1)
 
-    if not (0.0 <= min_bin_width < 1.0 / K):
-        raise ValueError(f"Need 0 <= min_bin_width < 1/K, got {min_bin_width} with K={K}")
-
     widths_soft = torch.softmax(raw_widths, dim=-1)
     widths = min_bin_width + (1.0 - K * min_bin_width) * widths_soft    #every bin has at least min_bin_width and there's K bins so that leaves (1-K)min_bin_width to control
 
-    zeros = torch.zeros((*widths.shape[:2], 1), device=device, dtype=dtype)
-    bins = torch.cat([zeros, torch.cumsum(widths, dim=-1)], dim=-1)
+    zeros = torch.zeros((*widths.shape[:2], 1), device=device, dtype=dtype)     #(B, D, 1)
+    bins = torch.cat([zeros, torch.cumsum(widths, dim=-1)], dim=-1)     #(B, D, K+1)
 
-    # optional: enforce exact right endpoint 1.0
-    bins[..., -1] = 1.0
+    # optional: enforce right endpoint
+    #bins[..., -1] = 1.0
     return bins
 
 
@@ -290,7 +389,7 @@ def pwl_inverse_transform(y_B, B_dims, heights, bins):
   '''
   Computes the inverse transform and associated Jacobian.
   Non-uniform bins permitted.
-  y_B:      (B, D_B)
+  y_B:      (B, D_B) where B is batch size and D_B is dimensionality of partition B (=1 here)
   '''
 
   device = y_B.device
@@ -333,10 +432,15 @@ def pwl_inverse_transform(y_B, B_dims, heights, bins):
   return g_inv(y_B), jac_det
 
 
-#neural network for cdf heights V
+#-----NEURAL NETWORKS-----#
+#used for both types of coupling layer
+
+#neural network for CDF (or PDF) heights V
 
 class flownet_V(nn.Module):
   def __init__(self, input_size, hidden_size, output_size):
+
+    #hidden_size = number of hidden nodes
 
     super().__init__()
     self.linear_layer_stack = nn.Sequential(
@@ -368,12 +472,15 @@ class flownet_W(nn.Module):
 
   def forward(self, x):
         return self.linear_layer_stack(x)
+  
 
+#-----LAYER CLASS-----#
 
 class pwl_layer(nn.Module):
   '''
   A self-contained piecewise-linear coupling layer.
   Includes forward transform, inverse transform and Jacobian determinant functions.
+  Designed to be stacked.
   '''
   def __init__(self, D_A, D_B, A_dims, B_dims, K, hidden_size, min_bin_width=1e-3, min_cdf_inc=1e-3):
 
@@ -383,10 +490,10 @@ class pwl_layer(nn.Module):
 
     self.D_A = D_A
     self.D_B = D_B
-    self.K = K
-    self.min_bin_width = min_bin_width
+    self.K = K      #number of bins
+    self.min_bin_width = min_bin_width      #if using relevant functions
     self.min_cdf_inc = min_cdf_inc
-    self.register_buffer("A_dims", A_dims)
+    self.register_buffer("A_dims", A_dims)      #dimensions in the partitions, how the flow will be defined
     self.register_buffer("B_dims", B_dims)
 
     #networks
@@ -419,6 +526,8 @@ class pwl_layer(nn.Module):
     B = self.B_dims.tolist()
     D_total = x.size(1)
 
+    #prevent accidental duplication
+
     assert len(A) == len(set(A)), f"Duplicate entries in A_dims: {A}"
     assert len(B) == len(set(B)), f"Duplicate entries in B_dims: {B}"
 
@@ -429,7 +538,9 @@ class pwl_layer(nn.Module):
     assert Aset.isdisjoint(Bset), f"Overlap in masks: {Aset & Bset}"
     assert (Aset | Bset) == full, f"Missing dims: {full - (Aset | Bset)}"
 
-    raw_heights = self.heights_net(x_A).reshape(batch, self.D_B, (self.K - 1))    #evaluate neural networks with x_A
+
+    #evaluate neural networks with x_A
+    raw_heights = self.heights_net(x_A).reshape(batch, self.D_B, (self.K - 1)) 
     raw_widths = self.widths_net(x_A).reshape(batch, self.D_B, self.K)
 
     #heights = self._heights_from_raw(raw_heights)
@@ -437,12 +548,12 @@ class pwl_layer(nn.Module):
     #bins = self._bins_from_raw(raw_widths)
     bins = raw_widths_to_bins(raw_widths)
 
-    y_A, y_B = pwl_g_coupling(x_A, x_B, heights, bins)    #apply the transform to x_B
+    #apply the transform to x_B
+    y_A, y_B = pwl_g_coupling(x_A, x_B, heights, bins)
 
     #reconstruct the y vector
 
     y = x.clone()
-    #y[:, self.A_dims] = y_A
     y[:, self.B_dims] = y_B
 
     return y
@@ -452,12 +563,14 @@ class pwl_layer(nn.Module):
 
     batch = y.size(0)
 
-    y_A = y[:, self.A_dims]
+    y_A = y[:, self.A_dims]     #apply mask
     y_B = y[:, self.B_dims]
 
     A = self.A_dims.tolist()
     B = self.B_dims.tolist()
     D_total = y.size(1)
+
+    #prevent accidental duplication specified in notebook
 
     assert len(A) == len(set(A)), f"Duplicate entries in A_dims: {A}"
     assert len(B) == len(set(B)), f"Duplicate entries in B_dims: {B}"
@@ -469,19 +582,22 @@ class pwl_layer(nn.Module):
     assert Aset.isdisjoint(Bset), f"Overlap in masks: {Aset & Bset}"
     assert (Aset | Bset) == full, f"Missing dims: {full - (Aset | Bset)}"
 
-    raw_heights = self.heights_net(y_A).reshape(batch, self.D_B, (self.K - 1))    #evaluate neural networks with y_A
+    #evaluate neural networks with y_A
+
+    raw_heights = self.heights_net(y_A).reshape(batch, self.D_B, (self.K - 1))
     raw_widths = self.widths_net(y_A).reshape(batch, self.D_B, self.K)
 
     #heights = pwl_raw_heights_to_params_stable(raw_heights, min_cdf_inc=self.min_cdf_inc)
     #bins = raw_widths_to_bins_stable(raw_widths, min_bin_width=self.min_bin_width)
     heights = pwl_raw_heights_to_params(raw_heights)
     bins = raw_widths_to_bins(raw_widths)
-
+    
+    #apply inverse transform
     x_B, jac_det = pwl_inverse_transform(y_B, self.B_dims, heights, bins)
     x_A = y_A
 
+    #reconstruct y vector
     x = y.clone()
-    #x[:, self.A_dims] = x_A
     x[:, self.B_dims] = x_B
 
     return x, jac_det
@@ -489,7 +605,7 @@ class pwl_layer(nn.Module):
 
 class Composition(nn.Module):
   '''
-  Composes the specified coupling layers and has the same functions as its constitients but generalised.
+  Stacks the specified coupling layers and has the same functions as its constitients, but generalised.
   '''
 
   def __init__(self, layers):
@@ -523,10 +639,11 @@ class Composition(nn.Module):
     return X, jac_dets
   
 
+#PWQ code
 
-def pwq_expand_heights(B, heights):   #copies parameters to fit batch size
+def pwq_expand_heights(B, heights):   #copies parameters to fit batch size (only used for debugging)
   '''
-  heights.shape = (D, K+1)
+  heights.shape = (D, K+1) for the quadratic PDF convention
   returns (B, D, K+1)
   '''
 
@@ -538,13 +655,13 @@ def pwq_expand_heights(B, heights):   #copies parameters to fit batch size
 
 
 def preprocess_params_2(heights, bins):
-    """
+    '''
     heights: (B, D_B, K+1) unnormalised PDF heights
     bins:    (B, D_B, K+1) bin edges - ascending; sum to 1
     returns:
       v:     (B, D_B, K+1) normalised PDF heights
       bin_areas: (B, D_B, K)   normalised bin areas
-    """
+    '''
 
     v = heights
     v_left = v[:, :, :-1]
@@ -607,10 +724,10 @@ def pwq_g_coupling(x_A, x_B, heights, bins):
   w_v = v_right - v_left    #slope of pdf inside bin (linear)
 
   #transform to local coordinate alpha
-  eps = torch.finfo(dtype).eps
-  alpha = (x_B - x_left) / (w_b + eps)    #avoid instability;  (B, D_B)
+  eps = torch.finfo(dtype).eps      #smallest possible value which can be represented using dtype
+  alpha = (x_B - x_left) / (w_b + eps)    #avoid instability;  shape (B, D_B)
 
-  #cumulative area to left of x values
+  #cumulative area to left of every x value
   cum_areas = torch.zeros(B, D_B, device=device, dtype=dtype)
   for d in range(D_B):
     for i in range(B):
@@ -674,7 +791,7 @@ def pwq_inverse_transform(y_B, B_dims, heights, bins):
 
   v_left = torch.gather(v, dim=2, index=j_unsq).squeeze(-1)
   v_right = torch.gather(v, dim=2, index=j_right_unsq).squeeze(-1)
-  w_v = v_right - v_left    #vertex differences
+  w_v = v_right - v_left    #vertical differences between pdf heights
 
   #solve quadratic to obtain alpha values
 
@@ -683,7 +800,7 @@ def pwq_inverse_transform(y_B, B_dims, heights, bins):
   b = v_left * w_b
   c = c_left - y_B
 
-  # linear vs quadratic bins
+  # linear vs quadratic cases
   eps = torch.finfo(dtype).eps
   is_linear = torch.abs(w_v) < eps
 
@@ -723,8 +840,8 @@ class pwq_layer(nn.Module):
 
     self.D_A = D_A
     self.D_B = D_B
-    self.K = K
-    self.register_buffer("A_dims", A_dims)
+    self.K = K      #number of bins
+    self.register_buffer("A_dims", A_dims)      #Dimensions in partitions - how the flow will be defined later
     self.register_buffer("B_dims", B_dims)
     self.min_bin_width = min_bin_width
 
@@ -752,6 +869,8 @@ class pwq_layer(nn.Module):
     B = self.B_dims.tolist()
     D_total = x.size(1)
 
+    #prevent accidental duplication of dimensions
+
     assert len(A) == len(set(A)), f"Duplicate entries in A_dims: {A}"
     assert len(B) == len(set(B)), f"Duplicate entries in B_dims: {B}"
 
@@ -762,8 +881,10 @@ class pwq_layer(nn.Module):
     assert Aset.isdisjoint(Bset), f"Overlap in masks: {Aset & Bset}"
     assert (Aset | Bset) == full, f"Missing dims: {full - (Aset | Bset)}"
 
+    #evaluate neural networks
+
     raw_heights = self.heights_net(x_A).reshape(batch, self.D_B, (self.K+1))
-    heights = torch.nn.functional.softplus(raw_heights) + torch.finfo(x.dtype).eps # Ensure positivity
+    heights = torch.nn.functional.softplus(raw_heights) + torch.finfo(x.dtype).eps # Ensure positivity for pdf
     raw_widths = self.widths_net(x_A).reshape(batch, self.D_B, self.K)
 
     #bins = self._bins_from_raw(raw_widths)
@@ -774,7 +895,6 @@ class pwq_layer(nn.Module):
     #reconstruct the y vector
 
     y = x.clone()
-    #y[:, self.A_dims] = y_A
     y[:, self.B_dims] = y_B
 
     return y
@@ -784,12 +904,14 @@ class pwq_layer(nn.Module):
 
     batch = y.size(0)
 
-    y_A = y[:, self.A_dims]
+    y_A = y[:, self.A_dims]     #apply mask
     y_B = y[:, self.B_dims]
 
     A = self.A_dims.tolist()
     B = self.B_dims.tolist()
     D_total = y.size(1)
+
+    #prevent duplication of dimensions
 
     assert len(A) == len(set(A)), f"Duplicate entries in A_dims: {A}"
     assert len(B) == len(set(B)), f"Duplicate entries in B_dims: {B}"
@@ -801,17 +923,20 @@ class pwq_layer(nn.Module):
     assert Aset.isdisjoint(Bset), f"Overlap in masks: {Aset & Bset}"
     assert (Aset | Bset) == full, f"Missing dims: {full - (Aset | Bset)}"
 
+    #evaluate neural networks
+
     raw_heights = self.heights_net(y_A).reshape(batch, self.D_B, (self.K+1))
     heights = torch.nn.functional.softplus(raw_heights) + torch.finfo(y.dtype).eps # Ensure positivity
     raw_widths = self.widths_net(y_A).reshape(batch, self.D_B, self.K)
 
     #bins = self._bins_from_raw(raw_widths)
     bins = raw_widths_to_bins(raw_widths)
+
+    #apply transform
     x_B, jac_det = pwq_inverse_transform(y_B, self.B_dims, heights, bins)
     x_A = y_A
 
     x = y.clone()
-    #x[:, self.A_dims] = x_A
     x[:, self.B_dims] = x_B
 
     return x, jac_det
@@ -823,7 +948,7 @@ def normalising_flow(layer_type, A_dims, B_dims, K, hidden_size, min_bin_width=1
   '''
   Works for arbitrary dimensions, masks, layers.
   A_dims, B_dims are lists of tensors containing the indices of the relevant dimensions - the maskings.
-  K is the number of bins for the piecewise-linear transformation.
+  K is the number of bins for the coupling transforms.
   hidden_size is the number of nodes in the hidden layer(s) of the neural networks.
   Returns the Composition object corresponding to the inputs.
   '''
@@ -868,6 +993,8 @@ def normalising_flow(layer_type, A_dims, B_dims, K, hidden_size, min_bin_width=1
   c = Composition(layers)
   return c
 
+
+#-----TRAINING-----#
 
 def train_loop_complete(f, D, layer_type, A_dims, B_dims, K, hidden_size, N, epochs, lr, device, ticker):    #using same K for each layer for now
 
@@ -919,6 +1046,7 @@ def train_loop_complete(f, D, layer_type, A_dims, B_dims, K, hidden_size, N, epo
 from collections import deque
 
 
+#-----TOP DECAY-----#
 
 def train_loop_decay(
     D,
@@ -938,12 +1066,12 @@ def train_loop_decay(
     lr_plateau_patience=200,
     early_stopping_patience=500,
     early_stopping_min_delta=2e-3,   # interpreted as relative min delta
-    ma_window=50,
+    ma_window=50,   #moving average window
     lr_cooldown=150,
     max_lr_reductions=3,
     min_lr=None,
 ):
-    """
+    '''
     Train normalising flow for decay-width variance reduction.
 
     Main logic:
@@ -952,8 +1080,8 @@ def train_loop_decay(
     - reduce LR on plateau
     - reset early-stopping counter after LR drop
     - only allow early stopping once LR schedule is exhausted
-    - restore best weights at the end
-    """
+    - restore best values at the end
+    '''
 
     if dtype is np.float64:
         torch_dtype = torch.float64
@@ -1002,10 +1130,11 @@ def train_loop_decay(
     epochs_since_lr_drop = 0
     num_lr_reductions = 0
 
-    # optional extra tracking for safety diagnostics
-    last_lr = optimiser.param_groups[0]["lr"]
+    
+    #training loop
 
     for epoch in range(epochs):
+        #new input vector to avoid overfitting
         V = torch.rand((N, D), device=device, dtype=torch_dtype)
 
         # inverse map and Jacobian
@@ -1017,6 +1146,7 @@ def train_loop_decay(
         # matrix element
         me2 = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
 
+        #new function evaluation (without decay width prefactor)
         h_evals = me2 * jac_dets * jac_map
         h_norm = h_evals / scale
 
@@ -1121,37 +1251,11 @@ def train_loop_decay(
     return final_loss, loss_values[:epoch + 1], smooth_loss_values[:epoch + 1], flow
 
 
-
-'''
-    if ticker and epoch % 20 == 0:
-      print(f"Epoch: {epoch} | Loss: {loss:.8e}")
-      print("Mean value: ", torch.mean(h_evals).detach().item())
-      print("Std h :", torch.std(h_evals).detach().item())
-      #print("me2 min/max:", me2.min().item(), me2.max().item())
-      #print("jac_dets min/max:", jac_dets.min().item(), jac_dets.max().item())
-      #print("jac_dets abs mean:", jac_dets.abs().mean().item())
-      #print("X min/max:", X.min().item(), X.max().item())
-      #print("X, jac_dets, me2, h_evals all finite?",
-            #torch.isfinite(X).all().item(),
-            #torch.isfinite(jac_dets).all().item(),
-            #torch.isfinite(me2).all().item(),
-            #torch.isfinite(h_evals).all().item())
-
-  final_loss = loss.detach()
-
-  return final_loss, loss_values, flow
-  '''
+#----------------------------------------------------DEBUGGING--------------------------------------------------------------#
 
 
-import numpy as np
-import torch
-from collections import deque
 
-
-from collections import deque
-import numpy as np
-import torch
-
+#Pearson Chi squared divergence-based loop
 
 def train_loop_decay_divergence(
     D,
@@ -1220,7 +1324,7 @@ def train_loop_decay_divergence(
     loss_values = torch.zeros(epochs, device=device, dtype=torch_dtype)
     smooth_loss_values = torch.zeros(epochs, device=device, dtype=torch_dtype)
 
-    recent_losses = deque(maxlen=ma_window)
+    recent_losses = deque(maxlen=ma_window)     #moving average losses which can be quickly replaced during iteration
 
     best_smooth = float("inf")
     best_loss = float("inf")   # raw loss at best smoothed epoch
@@ -1229,7 +1333,6 @@ def train_loop_decay_divergence(
     epochs_since_improvement = 0
 
     for epoch in range(epochs):
-        flow.train()
 
         V = torch.rand((N, D), device=device, dtype=torch_dtype)
         X, jac_dets = flow.inverse(V)
@@ -1239,12 +1342,8 @@ def train_loop_decay_divergence(
         w = me2 * jac_dets * jac_map
         w_norm = w / scale
 
-        # Pearson-chi^2 objective up to an additive constant
+        # Pearson-chi^2 objective
         loss = torch.mean(w_norm**2)
-
-        if not torch.isfinite(loss):
-            print(f"Non-finite loss at epoch {epoch}. Stopping.")
-            break
 
         loss_values[epoch] = loss.detach()
 
@@ -1262,6 +1361,7 @@ def train_loop_decay_divergence(
 
         scheduler.step(smooth_loss)
 
+        #early stopping
         if len(recent_losses) == ma_window:
             if smooth_loss < best_smooth - early_stopping_min_delta:
                 best_smooth = smooth_loss
@@ -1302,7 +1402,7 @@ def train_loop_decay_divergence(
 
 
 
-def _as_torch_dtype(dtype):
+def as_torch_dtype(dtype):
     if dtype is np.float64:
         return torch.float64
     if dtype is np.float32:
@@ -1310,7 +1410,7 @@ def _as_torch_dtype(dtype):
     return dtype
 
 
-def _tensor_stats(name, x):
+def tensor_stats(name, x):
     x_flat = x.reshape(-1)
     finite = torch.isfinite(x_flat)
     n_total = x_flat.numel()
@@ -1343,7 +1443,7 @@ def _tensor_stats(name, x):
     return out
 
 
-def _grad_and_param_norm(flow):
+def grad_and_param_norm(flow):
     grad_sq = 0.0
     param_sq = 0.0
     max_grad_abs = 0.0
@@ -1380,6 +1480,9 @@ def _grad_and_param_norm(flow):
 
 @torch.inference_mode()
 def estimate_unit_integral(flow, D, n_test=200_000, batch_size=50_000, device=None, dtype=None):
+    '''For debugging purposes.  Just collects Jacobians and integrates 'one' '''
+
+
     if device is None:
         device = next(flow.parameters()).device
     if dtype is None:
@@ -1395,7 +1498,7 @@ def estimate_unit_integral(flow, D, n_test=200_000, batch_size=50_000, device=No
         _, jac = flow.inverse(Y)
 
         jac = jac.reshape(-1)
-        finite = torch.isfinite(jac)
+        finite = torch.isfinite(jac)        #check for blowups
         jac_f = jac[finite]
 
         if jac_f.numel() > 0:
@@ -1412,7 +1515,7 @@ def estimate_unit_integral(flow, D, n_test=200_000, batch_size=50_000, device=No
 
     mean = sum_jac / n_done
     var = sum_jac2 / n_done - mean ** 2
-    var = torch.clamp(var, min=0.0)
+    #var = torch.clamp(var, min=0.0)
     std = torch.sqrt(var)
     err = std / torch.sqrt(torch.tensor(n_done, device=device, dtype=dtype))
 
@@ -1422,145 +1525,12 @@ def estimate_unit_integral(flow, D, n_test=200_000, batch_size=50_000, device=No
         "unit_int_n": n_done,
     }
 
-def train_loop_decay_diagnostic(
-    D,
-    layer_type,
-    A_dims,
-    B_dims,
-    K,
-    hidden_size,
-    N,
-    epochs,
-    lr,
-    device,
-    dtype,
-    ticker=True,
-    print_every=20,
-    unit_test_every=100,
-    unit_test_samples=500_000,
-    clip_grad=None,
-    m_t=173,
-):
-    torch_dtype = _as_torch_dtype(dtype)
-
-    flow = normalising_flow(
-        layer_type=layer_type,
-        A_dims=A_dims,
-        B_dims=B_dims,
-        K=K,
-        hidden_size=hidden_size,
-        min_bin_width=0.001,
-        min_cdf_inc = 0.001
-    ).to(device=device, dtype=torch_dtype)
-
-    optimiser = torch.optim.Adam(flow.parameters(), lr=lr)
-
-    with torch.no_grad():
-        V_scale = torch.rand((5 * N, D), device=device, dtype=torch_dtype)
-        X_scale, jac_dets_scale = flow.inverse(V_scale)
-        (P, P1, P2, P3), jac_map_scale = element.hypercube_to_momenta(X_scale, m_t=m_t)
-        me2_scale = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
-        h_scale = me2_scale * jac_dets_scale * jac_map_scale
-        scale = torch.std(h_scale)
-
-    print(f"Initial normalisation scale: {scale.item():.6e}")
-
-    loss_values = torch.zeros(epochs, device=device, dtype=torch_dtype)
-    diagnostics = []
-
-    for epoch in range(epochs):
-        V = torch.rand((N, D), device=device, dtype=torch_dtype)
-
-        X, jac_dets = flow.inverse(V)
-        (P, P1, P2, P3), jac_map = element.hypercube_to_momenta(X, m_t=m_t)
-        me2 = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
-
-        h_evals = me2 * jac_dets * jac_map
-        h_norm = h_evals / scale
-
-        loss = torch.var(h_norm)
-        loss_values[epoch] = loss.detach()
-
-        optimiser.zero_grad()
-        loss.backward()
-
-        grad_info_preclip = _grad_and_param_norm(flow)
-
-        if clip_grad is not None:
-            torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=clip_grad)
-
-        grad_info_postclip = _grad_and_param_norm(flow)
-
-        optimiser.step()
-
-        with torch.inference_mode():
-            #x_oob_frac = ((X < 0) | (X > 1)).double().mean().item()
-
-            record = {
-                "epoch": epoch,
-                "loss": loss.detach().item(),
-                "scale": scale.item(),
-                #"x_oob_frac": x_oob_frac,
-            }
-            record.update(_tensor_stats("jac", jac_dets))
-            record.update(_tensor_stats("jac_map", jac_map))
-            record.update(_tensor_stats("me2", me2))
-            record.update(_tensor_stats("h", h_evals))
-            record.update(_tensor_stats("h_norm", h_norm))
-            record.update(_tensor_stats("x", X))
-            record.update({f"preclip_{k}": v for k, v in grad_info_preclip.items()})
-            record.update({f"postclip_{k}": v for k, v in grad_info_postclip.items()})
-
-            if unit_test_every is not None and (epoch % unit_test_every == 0 or epoch == epochs - 1):
-                record.update(
-                    estimate_unit_integral(
-                        flow, D, n_test=unit_test_samples, batch_size=min(50_000, unit_test_samples),
-                        device=device, dtype=torch_dtype
-                    )
-                )
-
-            diagnostics.append(record)
-
-        if ticker and (epoch % print_every == 0 or epoch == epochs - 1):
-            msg = (
-                f"Epoch {epoch:5d} | "
-                f"loss={record['loss']:.6e} | "
-                f"jac_mean={record['jac_mean']:.6e} | "
-                f"jac_std={record['jac_std']:.6e} | "
-                f"jac_min={record['jac_min']:.6e} | "
-                f"jac_max={record['jac_max']:.6e} | "
-                f"jac_map_mean={record['jac_map_mean']:.6e} | "
-                #f"me2_mean={record['me2_mean']:.6e} | "
-                #f"h_mean={record['h_mean']:.6e} | "
-                f"h_std={record['h_std']:.6e} | "
-                #f"x_oob={record['x_oob_frac']:.3e} | "
-                f"grad_norm={record['postclip_grad_norm']:.6e}"
-            )
-            if "unit_int_mean" in record:
-                msg += (
-                    f" | unit_int={record['unit_int_mean']:.6e}"
-                    f" ± {record['unit_int_error']:.2e}"
-                )
-            print(msg)
-
-            if (
-                record["jac_finite_frac"] < 1.0
-                or record["x_finite_frac"] < 1.0
-                or record["jac_map_finite_frac"] < 1.0
-                or record["me2_finite_frac"] < 1.0
-                or record["h_finite_frac"] < 1.0
-            ):
-                print("  WARNING: non-finite values detected.")
-
-    final_loss = loss.detach()
-    return final_loss, loss_values, flow, diagnostics
 
 
-
-def _geometry_summary_across_layers(layer_summaries):
-    """
-    Reduce per-layer geometry summaries to a compact set of global diagnostics.
-    """
+def geometry_summary_across_layers(layer_summaries):
+    '''
+    Print key layer geometry stats for each layer
+    '''
     if len(layer_summaries) == 0:
         return {}
 
@@ -1576,11 +1546,10 @@ def _geometry_summary_across_layers(layer_summaries):
 
 @torch.inference_mode()
 def inspect_pwl_layer_geometry(flow, Y_probe):
-    """
-    Y_probe: (B, D) points in [0,1]^D used to probe the conditioning
-    Returns per-layer summaries of widths and cdf increments.
-
-    """
+    '''
+    Y_probe: (B, D) points in [0,1]^D
+    Returns per-layer summaries of bin widths and cdf increments.
+    '''
 
     summaries = []
 
@@ -1588,16 +1557,17 @@ def inspect_pwl_layer_geometry(flow, Y_probe):
         y_A = Y_probe[:, layer.A_dims]
         B = Y_probe.size(0)
 
+        #evaluate the layer's networks
         raw_heights = layer.heights_net(y_A).reshape(B, layer.D_B, layer.K - 1)
         raw_widths  = layer.widths_net(y_A).reshape(B, layer.D_B, layer.K)
 
         heights = layer._heights_from_raw(raw_heights)
         bins = layer._bins_from_raw(raw_widths)
 
-        # widths in x-space
+        # widths in "x" space
         widths = bins[..., 1:] - bins[..., :-1]   # (B, D_B, K)
 
-        # cdf increments in y-space
+        # cdf increments in "y" space
         zeros = torch.zeros((B, layer.D_B, 1), device=Y_probe.device, dtype=Y_probe.dtype)
         ones  = torch.ones((B, layer.D_B, 1), device=Y_probe.device, dtype=Y_probe.dtype)
         cdf = torch.cat([zeros, heights, ones], dim=-1)      # (B, D_B, K+1)
@@ -1633,9 +1603,10 @@ def pwl_geometry_penalty_weighted(
     lambda_cdf=0.0,
     eps=1e-12,
 ):
-    """
+    '''
     Geometry penalty with layer-dependent slope regularisation.
-    """
+    layer_slope_lambdas is a list of guessed cdf slope penalties
+    '''
     total_penalty = torch.tensor(0.0, device=Y_probe.device, dtype=Y_probe.dtype)
     layer_penalties = []
 
@@ -1646,7 +1617,7 @@ def pwl_geometry_penalty_weighted(
         raw_heights = layer.heights_net(y_A).reshape(B, layer.D_B, layer.K - 1)
         raw_widths  = layer.widths_net(y_A).reshape(B, layer.D_B, layer.K)
 
-        heights = layer._heights_from_raw(raw_heights)
+        heights = layer._heights_from_raw(raw_heights)      #for regulated params
         bins = layer._bins_from_raw(raw_widths)
 
         widths = bins[..., 1:] - bins[..., :-1]
@@ -1705,9 +1676,9 @@ def train_loop_decay_diagnostic_2(
     clip_grad=10.0,
     m_t=173,
     geometry_every=20,
-    geometry_probe_size=4096,
+    geometry_probe_size=5000,
 ):
-    torch_dtype = _as_torch_dtype(dtype)
+    torch_dtype = dtype
 
     flow = normalising_flow(
         layer_type=layer_type,
@@ -1731,6 +1702,8 @@ def train_loop_decay_diagnostic_2(
     lambda_cdf = 0.0
     penalty_probe_size = 1000
 
+
+    #initial normalisation scale from large batch
     with torch.no_grad():
         V_scale = torch.rand((5 * N, D), device=device, dtype=torch_dtype)
         X_scale, jac_dets_scale = flow.inverse(V_scale)
@@ -1765,21 +1738,21 @@ def train_loop_decay_diagnostic_2(
             lambda_cdf=lambda_cdf,
         )
 
-        loss = loss_main + geom_penalty
+        loss = loss_main + geom_penalty     #combined loss (variance plus penalty parameter)
         loss_values[epoch] = loss.detach()
 
         optimiser.zero_grad()
         loss.backward()
 
-        grad_info_preclip = _grad_and_param_norm(flow)
+        grad_info_preclip = grad_and_param_norm(flow)
 
         if clip_grad is not None:
             torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=clip_grad)
 
-        grad_info_postclip = _grad_and_param_norm(flow)
+        grad_info_postclip = grad_and_param_norm(flow)
 
         optimiser.step()
-        #scheduler.step(loss.detach())
+        scheduler.step(loss.detach())
 
         with torch.inference_mode():
             current_lr = optimiser.param_groups[0]["lr"]
@@ -1798,7 +1771,7 @@ def train_loop_decay_diagnostic_2(
                 "penalty_probe_size": int(penalty_probe_size),
             }
 
-            # store layerwise regularisation info for plotting later
+            # store layer regularisation info for plotting later
             for info in geom_info:
                 li = info["layer"]
                 record[f"layer{li}_lambda_slope"] = info["lambda_slope"]
@@ -1807,12 +1780,11 @@ def train_loop_decay_diagnostic_2(
                 record[f"layer{li}_cdf_penalty"] = info["cdf_penalty"]
                 record[f"layer{li}_layer_penalty"] = info["layer_penalty"]
 
-            record.update(_tensor_stats("jac", jac_dets))
-            record.update(_tensor_stats("jac_map", jac_map))
-            record.update(_tensor_stats("me2", me2))
-            record.update(_tensor_stats("h", h_evals))
-            record.update(_tensor_stats("h_norm", h_norm))
-            record.update(_tensor_stats("x", X))
+            record.update(tensor_stats("jac", jac_dets))
+            record.update(tensor_stats("me2", me2))
+            record.update(tensor_stats("h", h_evals))
+            record.update(tensor_stats("h_norm", h_norm))
+            record.update(tensor_stats("x", X))
             record.update({f"preclip_{k}": v for k, v in grad_info_preclip.items()})
             record.update({f"postclip_{k}": v for k, v in grad_info_postclip.items()})
 
@@ -1825,21 +1797,21 @@ def train_loop_decay_diagnostic_2(
                 layer_geom = inspect_pwl_layer_geometry(flow, Y_probe_geom)
 
                 record["layer_geometry"] = layer_geom
-                record.update(_geometry_summary_across_layers(layer_geom))
+                record.update(geometry_summary_across_layers(layer_geom))
 
                 for s in layer_geom:
-                    li = s["layer"]
-                    record[f"layer{li}_width_min"] = s["width_min"]
-                    record[f"layer{li}_width_mean"] = s["width_mean"]
-                    record[f"layer{li}_width_max"] = s["width_max"]
+                    l = s["layer"]
+                    record[f"layer{l}_width_min"] = s["width_min"]
+                    record[f"layer{l}_width_mean"] = s["width_mean"]
+                    record[f"layer{l}_width_max"] = s["width_max"]
 
-                    record[f"layer{li}_cdf_inc_min"] = s["cdf_inc_min"]
-                    record[f"layer{li}_cdf_inc_mean"] = s["cdf_inc_mean"]
-                    record[f"layer{li}_cdf_inc_max"] = s["cdf_inc_max"]
+                    record[f"layer{l}_cdf_inc_min"] = s["cdf_inc_min"]
+                    record[f"layer{l}_cdf_inc_mean"] = s["cdf_inc_mean"]
+                    record[f"layer{l}_cdf_inc_max"] = s["cdf_inc_max"]
 
-                    record[f"layer{li}_inv_slope_min"] = s["inv_slope_min"]
-                    record[f"layer{li}_inv_slope_mean"] = s["inv_slope_mean"]
-                    record[f"layer{li}_inv_slope_max"] = s["inv_slope_max"]
+                    record[f"layer{l}_inv_slope_min"] = s["inv_slope_min"]
+                    record[f"layer{l}_inv_slope_mean"] = s["inv_slope_mean"]
+                    record[f"layer{l}_inv_slope_max"] = s["inv_slope_max"]
 
             if unit_test_every is not None and (epoch % unit_test_every == 0 or epoch == epochs - 1):
                 record.update(
@@ -1866,7 +1838,6 @@ def train_loop_decay_diagnostic_2(
                 f"jac_std={record['jac_std']:.6e} | "
                 f"jac_min={record['jac_min']:.6e} | "
                 f"jac_max={record['jac_max']:.6e} | "
-                f"jac_map_mean={record['jac_map_mean']:.6e} | "
                 f"h_std={record['h_std']:.6e} | "
                 f"grad_norm={record['postclip_grad_norm']:.6e}"
             )
@@ -1889,29 +1860,20 @@ def train_loop_decay_diagnostic_2(
 
             print(msg)
 
-            if (
-                record["jac_finite_frac"] < 1.0
-                or record["x_finite_frac"] < 1.0
-                or record["jac_map_finite_frac"] < 1.0
-                or record["me2_finite_frac"] < 1.0
-                or record["h_finite_frac"] < 1.0
-            ):
-                print("  WARNING: non-finite values detected.")
-
-            # print layerwise penalty info
-            print("  Layer penalties:")
-            for li in range(len(layer_slope_lambdas)):
+            # print layer penalty info
+            print("Layer penalties:")
+            for l in range(len(layer_slope_lambdas)):
                 print(
-                    f"    layer {li}: "
-                    f"lambda_slope={record[f'layer{li}_lambda_slope']:.3e} | "
-                    f"slope_penalty={record[f'layer{li}_slope_penalty']:.3e} | "
-                    f"width_penalty={record[f'layer{li}_width_penalty']:.3e} | "
-                    f"cdf_penalty={record[f'layer{li}_cdf_penalty']:.3e} | "
-                    f"layer_penalty={record[f'layer{li}_layer_penalty']:.3e}"
+                    f"    layer {l}: "
+                    f"lambda_slope={record[f'layer{l}_lambda_slope']:.3e} | "
+                    f"slope_penalty={record[f'layer{l}_slope_penalty']:.3e} | "
+                    f"width_penalty={record[f'layer{l}_width_penalty']:.3e} | "
+                    f"cdf_penalty={record[f'layer{l}_cdf_penalty']:.3e} | "
+                    f"layer_penalty={record[f'layer{l}_layer_penalty']:.3e}"
                 )
 
             if "layer_geometry" in record:
-                print("  Layer geometry:")
+                print("Layer geometry:")
                 for s in record["layer_geometry"]:
                     print(
                         f"    layer {s['layer']}: "
@@ -1923,96 +1885,6 @@ def train_loop_decay_diagnostic_2(
     final_loss = loss.detach()
     return final_loss, loss_values, flow, diagnostics
 
-
-
-def distortion_plot(X, h):
-  '''
-  X: (B, 2) after inverse flow
-  h: f(X) * jacobians (function evaluations)
-  '''
-
-  fig, ax = plt.subplots(figsize=(8,6))
-  plot = ax.scatter(
-    X[0].squeeze().cpu(),
-    X[1].squeeze().cpu(),
-    c=h.cpu(),
-    s=6,
-    cmap='viridis'
-  )
-  ax.set_xlabel("$x_1$", fontsize=15)
-  ax.set_ylabel("$x_2$", fontsize=15)
-
-  ax.tick_params(axis="both", which="major", direction="out", length=5, labelsize=10)
-  ax.tick_params(axis="both", which="minor", direction="out", length=3)
-  ax.minorticks_on()
-
-  cbar = plt.colorbar(plot, ax=ax)
-  cbar.formatter = ticker.FormatStrFormatter('%.2f')
-  cbar.ax.tick_params(labelsize=16)
-  cbar.update_ticks()
-
-  ax.set_xlim(0.0, 1.0)
-  ax.set_ylim(0.0, 1.0)
-
-  plt.show()
-
-
-def plot_hist(flow, num_samples, bins, device):
-  '''
-  Plots histogram of the distribution of x values induced by passing uniformly sampled y values through the flow provided.
-  Ideally this should resemble the original function as much as possible.
-  '''
-
-  Y = torch.rand(num_samples, 2).to(device)
-
-  X, jacobians = flow.inverse(Y)
-  X = X.detach().cpu()
-
-  fig, ax = plt.subplots(figsize=(8,6))
-
-  plot = ax.hist2d(
-        X[:,0],
-        X[:,1],
-        bins=bins,
-        range=[[0,1],[0,1]],
-        cmap = 'viridis'
-  )
-
-  cbar = plt.colorbar(plot[3], ax=ax)
-  cbar.ax.tick_params(labelsize=10)
-  cbar.update_ticks()
-
-  ax.set_xlabel("$x_1$", fontsize=15)
-  ax.set_ylabel("$x_2$", fontsize=15)
-
-  plt.show()
-
-
-def plot_weights(f, X, jacobians):
-  '''
-  Computes importance weights using given args and returns a scatter plot.
-  '''
-
-  weights = f(X[:,0], X[:,1]) * torch.abs(jacobians)
-  weights = weights.detach().cpu()
-
-  fig, ax = plt.subplots(figsize=(8,6))
-
-  sc = ax.scatter(
-      X[:,0],
-      X[:,1],
-      c=weights,
-      s=1,
-      cmap="viridis"
-  )
-
-  cbar = plt.colorbar(sc, ax=ax)
-  cbar.ax.tick_params(labelsize=10)
-  cbar.update_ticks()
-
-  ax.set_xlim(0.0, 1.0)
-  ax.set_ylim(0.0, 1.0)
-  plt.show()
 
 
 
