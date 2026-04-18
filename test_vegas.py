@@ -37,7 +37,7 @@ def vegas_decay_width_estimator(
         mean         : vegas decay-width estimate
         stderr       : vegas integration error
         events_all   : tensor of shape (N, 4, 4)
-        weights_all  : tensor of shape (N,) with vegas event weights
+        weights_all  : tensor of shape (N) with vegas event weights
         integ        : adapted vegas integrator (useful for inspection / reuse)
         result       : raw vegas result object
     '''
@@ -47,7 +47,7 @@ def vegas_decay_width_estimator(
     dtype = torch.float64
     device='cpu'
 
-    #optional conservation check as always
+    #conservation check
     X_test = torch.rand((1000, 5), device=device, dtype=dtype)
     (_, P1t, P2t, P3t), _ = element.hypercube_to_momenta(X_test, m_t)
     element.check_conservation(P1t, P2t, P3t, m_t, tol=1e-10)
@@ -57,16 +57,18 @@ def vegas_decay_width_estimator(
     def f(x_numpy):
 
         '''
-        x_numpy: array (B, 5) which vegas will pass
-        Returns: array (B,)
+        x_numpy: shape (B, 5) which vegas will pass
+        Returns: shape (B) - ME vals
         '''
 
         #numpy to pytorch
         X = torch.from_numpy(np.ascontiguousarray(x_numpy)).to(device=device, dtype=dtype)
 
-        (P, P1, P2, P3), jac_map = element.hypercube_to_momenta(X, m_t)
+        #hypercube to matrix elements
+        (P, P1, P2, P3), jac_map = element.hypercube_to_momenta(X, m_t) 
         me2_vals = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
 
+        #decay widths
         vals = prefactor * me2_vals * jac_map
         return vals.detach().cpu().numpy()
     
@@ -93,10 +95,12 @@ def vegas_decay_width_estimator(
         for x_numpy, wgt_np in integ.random_batch():
             X = torch.from_numpy(np.ascontiguousarray(x_numpy)).to(device=device, dtype=dtype)
             wgt = torch.from_numpy(np.ascontiguousarray(wgt_np)).to(device=device, dtype=dtype)
-
+            
+            #get matrix elements
             (P, P1, P2, P3), jac_map = element.hypercube_to_momenta(X, m_t)
             me2_vals = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
-
+            
+            #decay widths
             evals = prefactor * me2_vals * jac_map
 
             #vegas event weight
@@ -115,6 +119,7 @@ def vegas_decay_width_estimator(
 
             n_total += events.size(0)
 
+            #save memory
             del X, wgt, P, P1, P2, P3, jac_map, me2_vals, evals, weights, events
 
             if n_total >= B_total:
@@ -123,13 +128,13 @@ def vegas_decay_width_estimator(
         gc.collect()
 
     events_all = torch.cat(events_all, dim=0)   #(B_total, 4, 4)
-    weights_all = torch.cat(weights_all, dim=0) #(B_total,)
+    weights_all = torch.cat(weights_all, dim=0) #(B_total)
 
     return mean, stderr, events_all, weights_all, integ, result
 
 
 
-#obtain a number of estimates here and check distribution
+#if taking multiple estimates
 
 def vegas_estimates(
     n_estimates, 
