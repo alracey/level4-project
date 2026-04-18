@@ -3,6 +3,7 @@ import math
 import numpy as np
 import torch
 import gc
+import matplotlib.pyplot as plt
 
 #example from VEGAS documentation tutorial#
 '''def f(x):
@@ -126,3 +127,35 @@ def vegas_decay_width_estimator(
 
     return mean, stderr, events_all, weights_all, integ, result
 
+
+
+#obtain a number of estimates here and check distribution
+
+def vegas_estimates(
+    n_estimates, 
+    B_total=1_000_000,
+    nitn_adapt=10,
+    neval_adapt=20000,
+    nitn_prod=10,
+    neval_prod=100_000,
+    nhcube_batch=750
+):
+    
+    mean_values = np.zeros(n_estimates)
+    stderr_values = np.zeros(n_estimates)
+
+    for i in range(n_estimates):
+
+        mean_vegas, stderr_vegas, _, _, _, _ = vegas_decay_width_estimator(
+            B_total,
+            nitn_adapt,
+            neval_adapt,
+            nitn_prod,
+            neval_prod,
+            nhcube_batch
+        )
+
+        mean_values[i] = mean_vegas
+        stderr_values[i] = stderr_vegas
+
+    return mean_values, stderr_values
