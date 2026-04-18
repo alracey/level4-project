@@ -916,82 +916,213 @@ def train_loop_complete(f, D, layer_type, A_dims, B_dims, K, hidden_size, N, epo
 
   return final_loss, loss_values, flow
 
-
-def train_loop_decay(D, layer_type, A_dims, B_dims, K, hidden_size, N, epochs, lr, device, dtype, ticker):    #using same K for each layer for now
-
-  if dtype is np.float64:
-    torch_dtype = torch.float64
-  elif dtype is np.float32:
-    torch_dtype = torch.float32
-  else:
-    torch_dtype=dtype
-
-  #instantiate flow with specified parameters
-  flow = normalising_flow(
-      layer_type,
-      A_dims=A_dims,
-      B_dims=B_dims,
-      K=K,
-      hidden_size=hidden_size
-  ).to(device=device, dtype=torch_dtype)
-
-  #optimiser
-  optimiser = torch.optim.Adam([
-      {"params": flow.parameters(), "lr": lr}
-      ])
-  
-  scheduler = torch.optim.lr_scheduler.MultiStepLR(optimiser, milestones=[5500], gamma=0.3)
-
-  #normalisation - determine scaling from initial batch evaluation
-
-  with torch.no_grad():
-    V_scale = torch.rand((5*N, D), device=device, dtype=torch_dtype)    #large batch
-    X_scale, jac_dets_scale = flow.inverse(V_scale)
-    (P, P1, P2, P3), jac_map_scale = element.hypercube_to_momenta(X_scale, m_t=173)
-    me2_scale = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
-    h_scale = me2_scale * jac_dets_scale * jac_map_scale
-    scale = torch.std(h_scale)
-    print('Normalisation scale:', scale.item())
+from collections import deque
 
 
-  loss_values = torch.zeros(epochs, device=device, dtype=torch_dtype)
 
-  for epoch in range(epochs):
+def train_loop_decay(
+    D,
+    layer_type,
+    A_dims,
+    B_dims,
+    K,
+    hidden_size,
+    N,
+    epochs,
+    lr,
+    device,
+    dtype,
+    ticker,
+    max_grad_norm=50.0,
+    lr_plateau_factor=0.5,
+    lr_plateau_patience=200,
+    early_stopping_patience=500,
+    early_stopping_min_delta=2e-3,   # interpreted as relative min delta
+    ma_window=50,
+    lr_cooldown=150,
+    max_lr_reductions=3,
+    min_lr=None,
+):
+    """
+    Train normalising flow for decay-width variance reduction.
 
-    V = torch.rand((N, D), device=device, dtype=torch_dtype)    #[0, 1]^5
+    Main logic:
+    - monitor smoothed loss only
+    - use relative improvement criterion
+    - reduce LR on plateau
+    - reset early-stopping counter after LR drop
+    - only allow early stopping once LR schedule is exhausted
+    - restore best weights at the end
+    """
 
-    #inverse, jacobian determinants
-    X, jac_dets = flow.inverse(V)   #X still [0,1]^5
+    if dtype is np.float64:
+        torch_dtype = torch.float64
+    elif dtype is np.float32:
+        torch_dtype = torch.float32
+    else:
+        torch_dtype = dtype
 
-    #map transformed points to usable variables
-    #[0, 1]^5 --> E1, E2, costheta1, phi1, phi2
-    #get N sets of momenta from the N sets of E1, E2, ...
-    (P, P1, P2, P3), jac_map = element.hypercube_to_momenta(X, m_t=173)
+    if min_lr is None:
+        min_lr = lr / 16.0
 
-    #evaluate N matrix elements
+    # instantiate flow
+    flow = normalising_flow(
+        layer_type,
+        A_dims=A_dims,
+        B_dims=B_dims,
+        K=K,
+        hidden_size=hidden_size
+    ).to(device=device, dtype=torch_dtype)
 
-    me2 = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
+    optimiser = torch.optim.Adam([
+        {"params": flow.parameters(), "lr": lr}
+    ])
 
-    h_evals = me2 * jac_dets * jac_map
-    #h_evals = jac_dets * jac_map
-    #normalise
+    # normalisation scale from an initial large batch
+    with torch.no_grad():
+        V_scale = torch.rand((5 * N, D), device=device, dtype=torch_dtype)
+        X_scale, jac_dets_scale = flow.inverse(V_scale)
+        (P, P1, P2, P3), jac_map_scale = element.hypercube_to_momenta(X_scale, m_t=173)
+        me2_scale = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
+        h_scale = me2_scale * jac_dets_scale * jac_map_scale
+        scale = torch.std(h_scale)
+        print("Normalisation scale:", scale.item())
 
-    h_norm = h_evals / scale
+    loss_values = torch.zeros(epochs, device=device, dtype=torch_dtype)
+    smooth_loss_values = torch.zeros(epochs, device=device, dtype=torch_dtype)
 
-    #compute loss
-    loss = torch.var(h_norm)
-    loss_values[epoch] = loss.detach()
+    recent_losses = deque(maxlen=ma_window)
 
-    optimiser.zero_grad()
+    best_smooth = float("inf")
+    best_loss = float("inf")
+    best_epoch = -1
+    best_state_dict = None
 
-    loss.backward()
+    epochs_since_improvement = 0
+    epochs_since_lr_drop = 0
+    num_lr_reductions = 0
 
-    #torch.nn.utils.clip_grad_norm_(flow.parameters(), max_norm=1.0)
+    # optional extra tracking for safety diagnostics
+    last_lr = optimiser.param_groups[0]["lr"]
 
-    optimiser.step()
+    for epoch in range(epochs):
+        V = torch.rand((N, D), device=device, dtype=torch_dtype)
 
-    scheduler.step()
+        # inverse map and Jacobian
+        X, jac_dets = flow.inverse(V)
 
+        # map to momenta
+        (P, P1, P2, P3), jac_map = element.hypercube_to_momenta(X, m_t=173)
+
+        # matrix element
+        me2 = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
+
+        h_evals = me2 * jac_dets * jac_map
+        h_norm = h_evals / scale
+
+        # variance loss
+        loss = torch.var(h_norm)
+        loss_values[epoch] = loss.detach()
+
+        optimiser.zero_grad()
+        loss.backward()
+
+        pre_clip_grad_norm = torch.nn.utils.clip_grad_norm_(
+            flow.parameters(),
+            max_norm=max_grad_norm
+        )
+
+        optimiser.step()
+
+        loss_scalar = float(loss.item())
+        recent_losses.append(loss_scalar)
+        smooth_loss = sum(recent_losses) / len(recent_losses)
+        smooth_loss_values[epoch] = smooth_loss
+
+        epochs_since_lr_drop += 1
+
+        # only start monitoring once MA window is full
+        if len(recent_losses) == ma_window:
+            # relative improvement criterion
+            improved = smooth_loss < best_smooth * (1.0 - early_stopping_min_delta)
+
+            if improved:
+                best_smooth = smooth_loss
+                best_loss = loss_scalar
+                best_epoch = epoch
+                epochs_since_improvement = 0
+                best_state_dict = {
+                    k: v.detach().clone()
+                    for k, v in flow.state_dict().items()
+                }
+            else:
+                epochs_since_improvement += 1
+
+            current_lr = optimiser.param_groups[0]["lr"]
+
+            # reduce LR on plateau, with cooldown
+            can_reduce_lr = (
+                epochs_since_improvement >= lr_plateau_patience
+                and epochs_since_lr_drop >= lr_cooldown
+                and num_lr_reductions < max_lr_reductions
+                and current_lr > min_lr
+            )
+
+            if can_reduce_lr:
+                new_lr = max(current_lr * lr_plateau_factor, min_lr)
+
+                # only count as a reduction if LR actually changes
+                if new_lr < current_lr:
+                    for param_group in optimiser.param_groups:
+                        param_group["lr"] = new_lr
+
+                    num_lr_reductions += 1
+                    epochs_since_improvement = 0
+                    epochs_since_lr_drop = 0
+                    last_lr = new_lr
+
+                    if ticker:
+                        print(
+                            f"LR reduced at epoch {epoch}: "
+                            f"{current_lr:.3e} -> {new_lr:.3e} "
+                            f"(reduction {num_lr_reductions}/{max_lr_reductions})"
+                        )
+
+            # only early stop once LR schedule is exhausted
+            lr_exhausted = (
+                num_lr_reductions >= max_lr_reductions
+                or optimiser.param_groups[0]["lr"] <= min_lr
+            )
+
+            if lr_exhausted and epochs_since_improvement >= early_stopping_patience:
+                print(
+                    f"Early stopping at epoch {epoch}. "
+                    f"Best smoothed loss {best_smooth:.3e} at epoch {best_epoch} "
+                    f"(raw loss {best_loss:.3e})."
+                )
+                break
+
+        if ticker and epoch % 20 == 0:
+            print(f"Epoch {epoch} | Loss {loss_scalar:.3e}")
+            print(f"Smoothed loss: {smooth_loss:.3e}")
+            print("Pre-clip grad norm:", float(pre_clip_grad_norm))
+            print("LR:", optimiser.param_groups[0]["lr"])
+            print("Best raw loss:", best_loss)
+            print("Best smoothed loss:", best_smooth)
+            print("Epochs since improvement:", epochs_since_improvement)
+            print("Epochs since LR drop:", epochs_since_lr_drop)
+            print("LR reductions:", num_lr_reductions)
+
+    # restore best weights
+    if best_state_dict is not None:
+        flow.load_state_dict(best_state_dict)
+
+    final_loss = torch.tensor(best_loss, device=device, dtype=torch_dtype)
+    return final_loss, loss_values[:epoch + 1], smooth_loss_values[:epoch + 1], flow
+
+
+
+'''
     if ticker and epoch % 20 == 0:
       print(f"Epoch: {epoch} | Loss: {loss:.8e}")
       print("Mean value: ", torch.mean(h_evals).detach().item())
@@ -1009,8 +1140,165 @@ def train_loop_decay(D, layer_type, A_dims, B_dims, K, hidden_size, N, epochs, l
   final_loss = loss.detach()
 
   return final_loss, loss_values, flow
+  '''
 
 
+import numpy as np
+import torch
+from collections import deque
+
+
+from collections import deque
+import numpy as np
+import torch
+
+
+def train_loop_decay_divergence(
+    D,
+    layer_type,
+    A_dims,
+    B_dims,
+    K,
+    hidden_size,
+    N,
+    epochs,
+    lr,
+    device,
+    dtype,
+    ticker,
+    max_grad_norm=50.0,
+    lr_plateau_factor=0.5,
+    lr_plateau_patience=200,
+    lr_plateau_threshold=1e-4,
+    lr_plateau_min_lr=1e-7,
+    early_stopping_patience=500,
+    early_stopping_min_delta=1e-3,
+    ma_window=50,
+):
+    if dtype is np.float64:
+        torch_dtype = torch.float64
+    elif dtype is np.float32:
+        torch_dtype = torch.float32
+    else:
+        torch_dtype = dtype
+
+    flow = normalising_flow(
+        layer_type,
+        A_dims=A_dims,
+        B_dims=B_dims,
+        K=K,
+        hidden_size=hidden_size,
+    ).to(device=device, dtype=torch_dtype)
+
+    optimiser = torch.optim.Adam(flow.parameters(), lr=lr)
+
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimiser,
+        mode="min",
+        factor=lr_plateau_factor,
+        patience=lr_plateau_patience,
+        threshold=lr_plateau_threshold,
+        threshold_mode="rel",
+        min_lr=lr_plateau_min_lr,
+    )
+
+    with torch.no_grad():
+        V_scale = torch.rand((5 * N, D), device=device, dtype=torch_dtype)
+        X_scale, jac_dets_scale = flow.inverse(V_scale)
+        (P, P1, P2, P3), jac_map_scale = element.hypercube_to_momenta(X_scale, m_t=173)
+        me2_scale = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
+
+        w_scale = me2_scale * jac_dets_scale * jac_map_scale
+        scale = torch.sqrt(torch.mean(w_scale**2))
+        scale = torch.clamp(
+            scale,
+            min=torch.tensor(1e-12, device=device, dtype=torch_dtype),
+        )
+
+        print("Chi^2/RMS scale:", scale.item())
+
+    loss_values = torch.zeros(epochs, device=device, dtype=torch_dtype)
+    smooth_loss_values = torch.zeros(epochs, device=device, dtype=torch_dtype)
+
+    recent_losses = deque(maxlen=ma_window)
+
+    best_smooth = float("inf")
+    best_loss = float("inf")   # raw loss at best smoothed epoch
+    best_epoch = -1
+    best_state_dict = None
+    epochs_since_improvement = 0
+
+    for epoch in range(epochs):
+        flow.train()
+
+        V = torch.rand((N, D), device=device, dtype=torch_dtype)
+        X, jac_dets = flow.inverse(V)
+        (P, P1, P2, P3), jac_map = element.hypercube_to_momenta(X, m_t=173)
+        me2 = element.batch_element_eval(P, P1, P2, P3, device=device, dtype=dtype)
+
+        w = me2 * jac_dets * jac_map
+        w_norm = w / scale
+
+        # Pearson-chi^2 objective up to an additive constant
+        loss = torch.mean(w_norm**2)
+
+        if not torch.isfinite(loss):
+            print(f"Non-finite loss at epoch {epoch}. Stopping.")
+            break
+
+        loss_values[epoch] = loss.detach()
+
+        optimiser.zero_grad()
+        loss.backward()
+        pre_clip_grad_norm = torch.nn.utils.clip_grad_norm_(
+            flow.parameters(), max_norm=max_grad_norm
+        )
+        optimiser.step()
+
+        loss_scalar = loss.item()
+        recent_losses.append(loss_scalar)
+        smooth_loss = sum(recent_losses) / len(recent_losses)
+        smooth_loss_values[epoch] = smooth_loss
+
+        scheduler.step(smooth_loss)
+
+        if len(recent_losses) == ma_window:
+            if smooth_loss < best_smooth - early_stopping_min_delta:
+                best_smooth = smooth_loss
+                best_loss = loss_scalar
+                best_epoch = epoch
+                epochs_since_improvement = 0
+                best_state_dict = {
+                    k: v.detach().clone()
+                    for k, v in flow.state_dict().items()
+                }
+            else:
+                epochs_since_improvement += 1
+
+        if ticker and epoch % 20 == 0:
+            print(f"Epoch {epoch} | Loss {loss_scalar:.3e}")
+            print(f"Smoothed loss: {smooth_loss:.3e}")
+            print("Mean w_norm:", torch.mean(w_norm).item())
+            print("Std w_norm:", torch.std(w_norm).item())
+            print("Pre-clip grad norm:", float(pre_clip_grad_norm))
+            print("LR:", optimiser.param_groups[0]["lr"])
+            print("Best raw loss:", best_loss)
+            print("Best smoothed loss:", best_smooth)
+            print("Epochs since improvement:", epochs_since_improvement)
+
+        if len(recent_losses) == ma_window and epochs_since_improvement >= early_stopping_patience:
+            print(
+                f"Early stopping at epoch {epoch}. "
+                f"Best smoothed loss {best_smooth:.3e} at epoch {best_epoch} "
+                f"(raw loss {best_loss:.3e})."
+            )
+            break
+
+    if best_state_dict is not None:
+        flow.load_state_dict(best_state_dict)
+
+    final_loss = torch.tensor(best_loss, device=device, dtype=torch_dtype)
+    return final_loss, loss_values[:epoch + 1], smooth_loss_values[:epoch + 1], flow
 
 
 
